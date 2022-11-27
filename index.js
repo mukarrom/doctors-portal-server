@@ -1,4 +1,6 @@
 const express = require('express');
+const nodemailer = require('nodemailer');
+const sgTransport = require('nodemailer-sendgrid-transport');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const { MongoClient, ServerApiVersion } = require('mongodb');
@@ -36,13 +38,58 @@ function verifyJWT(req, res, next) {
 	});
 }
 
+const EmailSenderOptions = {
+	auth: {
+		api_key: process.env.EMAIL_SENDER_KEY,
+	}
+}
+const mailer = nodemailer.createTransport(sgTransport(EmailSenderOptions));
+const sendAppointmentEmail = (booking)=>{
+	const {patient, patientName, treatment, date, slot} = booking;
+	const email = {
+		to: patient,
+		from: process.env.EMAIL_SENDER,
+		subject: `Your appointment for ${treatment} is on ${date} at ${slot} is confirmed.`,
+		text: `Your appointment for ${treatment} is on ${date} at ${slot} is confirmed.`,
+		html: `
+		<div>
+			<p class="">Hello ${patientName}</p>
+			<h3>Your appointment for ${treatment} is confirmed</h3>
+			<p>Lookin forwore to seeing you on ${date} at ${slot}.</p>
+			
+			<h3>Our Address</h3>
+			<p>2350 Bhairab, Kishoreganj</p>
+			<p>Dhaka, Bangladesh</p>
+			<a href="https://khidmait.com">Khidma it</a>
+		</div>
+		`
+	};
+	mailer.sendMail(email, function(err, res) {
+		if (err) {
+			console.log(err)
+		}
+		console.log(res);
+	});
+}
+
 async function run() {
 	try {
 		await client.connect();
 		const serviceCollection = client.db('doctors_portal').collection('services');
 		const bookingCollection = client.db('doctors_portal').collection('bookings');
 		const userCollection = client.db('doctors_portal').collection('users');
+		const doctorCollection = client.db('doctors_portal').collection('doctors');
 
+		// verify admin middleware
+		const verifyAdmin = async (req, res, next)=>{
+			const requester = req.decoded.email;
+			const requesterAccount = await userCollection.findOne({email: requester});
+			if(requesterAccount.role === 'admin'){
+				next();
+			} else {
+				res.status(403).send({message: "Forbidden, Only admin can access"})
+			}
+		}
 		/**
 		 * API Naming Convention
 		 * app.get('/service') // available services
@@ -68,12 +115,9 @@ async function run() {
 		})
 
 		// make admin
-		app.put('/user/admin/:email', verifyJWT, async (req, res)=>{
+		app.put('/user/admin/:email', verifyJWT, verifyAdmin, async (req, res)=>{
 			// get email from url params
 			const email= req.params.email;
-			const requester = req.decoded.email;
-			const requesterAccount = await userCollection.findOne({email: requester});
-			if(requesterAccount.role === 'admin'){
 				// filter
 				const filter = {email: email};
 				const updateDoc = {
@@ -82,10 +126,6 @@ async function run() {
 				// upsert in database
 				const result = await userCollection.updateOne(filter, updateDoc);
 				res.send(result);
-			} else {
-				res.status(403).send({message: "Forbidden"})
-			}
-
 		});
 
 		// save new users in database and verify with jwt token
@@ -109,8 +149,8 @@ async function run() {
 
 		// get all services and slots
 		app.get('/services', async (req, res) => {
-			const query = {};
-			const cursor = serviceCollection.find(query);
+			// const query = {};
+			const cursor = serviceCollection.find().project({name:1});
 			const services = await cursor.toArray();
 			res.send(services);
 		});
@@ -141,6 +181,7 @@ async function run() {
 				return res.send({ success: false, booking: exists });
 			}
 			const result = await bookingCollection.insertOne(booking);
+			sendAppointmentEmail(booking);
 			res.send({ success: true, booking: result });
 		});
 
@@ -177,27 +218,30 @@ async function run() {
 			res.send(services);
 		});
 
-		// app.get('/available', async (req, res) => {
-		// 	const date = req.query.date || 'Nov 19, 2022';
+		/**
+		 * ==============>  doctors api
+		 */
+	// get doctors
+		app.get('/doctors', verifyJWT, verifyAdmin, async (req, res)=>{
+			const doctors = await doctorCollection.find().toArray();
+			res.send(doctors)
+		});
 
-		// 	// step 1: get all services
-		// 	const services = await serviceCollection.find().toArray();
-		// 	// step 2: get the booking of that day
-		// 	const query = { date: date };
-		// 	const bookings = await bookingCollection.find(query).toArray();
+	//	Post a doctor
+		app.post('/doctors', verifyJWT, verifyAdmin, async (req, res)=>{
+			const doctor = req.body;
+			const result = await doctorCollection.insertOne(doctor);
+			res.send(result);
+		})
 
-		// 	// step 3: for each service, find booking for that service
-		// 	services.forEach(service => {
-		// 		const serviceBookings = bookings.filter(
-		// 			b => b.treatment === service.name
-		// 		);
-		// 		const booked = serviceBookings.map(s => s.slot);
-		// 		const available = service.slots.filter(s => !booked.includes(s));
-		// 		service.available = available;
-		// 	});
+	//	Delete a doctor
+		app.delete('/doctors/:email', verifyJWT, verifyAdmin, async (req, res)=>{
+			const email = req.params.email;
+			const filter = {email: email}
+			const result = await doctorCollection.deleteOne(filter);
+			res.send(result);
+		})
 
-		// 	res.send(services);
-		// });
 	} finally {
 	}
 }
